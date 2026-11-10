@@ -1,0 +1,131 @@
+name: Pipeline de Evolucao Segura (CI/CD)
+
+# 1. GATILHO: apenas tags de versao (v1.0.0, v1.1.2, ...).
+# Commits comuns na branch nao disparam esta esteira.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  analise_codigo_e_seguranca:
+    name: SonarQube & Trivy Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validar configuracao do SonarCloud
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "Defina o secret SONAR_TOKEN."
+            exit 1
+          fi
+          if [ -z "$SONAR_ORGANIZATION" ] || [ -z "$SONAR_PROJECT_KEY" ]; then
+            echo "Defina as variables SONAR_ORGANIZATION e SONAR_PROJECT_KEY."
+            exit 1
+          fi
+
+      - name: Configurar JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Compilar, testar e gerar cobertura JaCoCo
+        run: ./mvnw -B -ntp verify
+
+      # 2. ANALISE ESTATICA (SONAR)
+      # A action citada no enunciado (sonarsource/sonarcloud-github-action)
+      # foi arquivada em 2025-10-22. A substituta oficial, drop-in, e
+      # SonarSource/sonarqube-scan-action. sonar.qualitygate.wait faz o job
+      # falhar quando o Quality Gate nao passa, e so entao o Docker Hub e bloqueado.
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v8.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.qualitygate.wait=true
+
+      # 3. VERIFICACAO DE SEGURANCA (TRIVY) — dependencias e ficheiros do repositorio
+      - name: Rodar Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          ignore-unfixed: true
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          hide-progress: true
+          timeout: 15m0s
+          skip-dirs: target,.git,.scannerwork,.m2
+
+  build_and_push_docker:
+    name: Build e Push para Docker Hub
+    needs: analise_codigo_e_seguranca
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v4
+
+      - name: Validar credenciais do Docker Hub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -z "$DOCKER_USERNAME" ] || [ -z "$DOCKER_PASSWORD" ]; then
+            echo "Defina os secrets DOCKER_USERNAME e DOCKER_PASSWORD."
+            exit 1
+          fi
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # A imagem e construida e carregada no daemon, mas ainda nao e publicada.
+      - name: Build da imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/sistema-reengenheirado:${{ github.ref_name }}
+
+      # Trivy na imagem base (JDK / Alpine) antes de autorizar o push.
+      - name: Trivy na imagem Docker
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/sistema-reengenheirado:${{ github.ref_name }}
+          ignore-unfixed: true
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          vuln-type: os,library
+          hide-progress: true
+          timeout: 15m0s
+
+      # 4. BUILD & PUSH — so chega aqui se o scan da imagem passar.
+      - name: Push para o Docker Hub
+        env:
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/sistema-reengenheirado:${{ github.ref_name }}
+        run: docker push "$IMAGE"
