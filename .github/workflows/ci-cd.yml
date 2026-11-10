@@ -42,24 +42,22 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Compilar, testar e gerar cobertura JaCoCo
-        run: ./mvnw -B -ntp verify
-
       # 2. ANALISE ESTATICA (SONAR)
-      # A action citada no enunciado (sonarsource/sonarcloud-github-action)
-      # foi arquivada em 2025-10-22. A substituta oficial, drop-in, e
-      # SonarSource/sonarqube-scan-action. sonar.qualitygate.wait faz o job
-      # falhar quando o Quality Gate nao passa, e so entao o Docker Hub e bloqueado.
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@v8.1.0
+      # Projeto Maven: o scanner oficial e o sonar-maven-plugin, que enxerga
+      # o bytecode e o relatorio JaCoCo. A action generica reprovou o Quality
+      # Gate (exit code 3) porque a cobertura nao entrou na analise.
+      # sonar.qualitygate.wait faz o job falhar se o gate nao passar.
+      - name: Compilar, testar e analisar no SonarCloud
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          args: >
-            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
-            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
-            -Dsonar.qualitygate.wait=true
+        run: >
+          ./mvnw -B -ntp verify
+          org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
+          -Dsonar.projectKey="${{ vars.SONAR_PROJECT_KEY }}"
+          -Dsonar.organization="${{ vars.SONAR_ORGANIZATION }}"
+          -Dsonar.host.url=https://sonarcloud.io
+          -Dsonar.qualitygate.wait=true
+          -Dsonar.qualitygate.timeout=300
 
       # 3. VERIFICACAO DE SEGURANCA (TRIVY) — dependencias e ficheiros do repositorio
       - name: Rodar Trivy Vulnerability Scanner
